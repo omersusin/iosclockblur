@@ -1,0 +1,20 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // Xposed/LSPosed API stubs (compileOnly, not bundled in the APK)
+        maven { url 'https://api.xposed.info/' }
+    }
+}
+
+rootProject.name = "iosclockblur"
+include ':app'

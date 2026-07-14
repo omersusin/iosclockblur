@@ -1,0 +1,63 @@
+# iOS Blur Clock (LSPosed modulu)
+
+ROM'un yerlesik "Ozel Saat Stili" (ClockStyle.java) sistemindeki saat rakamlarini,
+duvar kagidinin bulaniklastirilmis ve ekrandaki gercek konumuna hizalanmis bir
+versiyonuyla dolduran bir Xposed/LSPosed modulu. Sadece saydamlik (alpha) degil,
+gercek "buzlu cam" gorunumu.
+
+## Nasil calisiyor
+
+- `com.android.systemui.clocks.ClockStyle.updateClockView()` metodu hook'lanir.
+- Bu metod calistiktan sonra, sinifin `textClocks` alanindaki her `TextClock`
+  icin: duvar kagidini kucult -> bulaniklastir (3 gecisli box blur) -> o
+  view'in ekrandaki konumuna gore kirpip `BitmapShader` olarak `Paint`'e basar.
+- Kilit ekrani arkasinda gercekten sadece duvar kagidi oldugu icin (baska hicbir
+  sey saatin arkasindan gecmiyor), statik bulanik bir kopya gercek "canli" blur
+  ile ayni gorunur.
+- Duvar kagidi degisirse (`ACTION_WALLPAPER_CHANGED`) onbellek temizlenir.
+
+## Kurulum
+
+1. Bu repoyu GitHub'a pushla, Actions sekmesinden "Build iOS Blur Clock Module"
+   workflow'unun bitmesini bekle, `iosclockblur-debug-apk` artifact'ini indir.
+2. APK'yi telefona kur (bilinmeyen kaynaklara izin gerekebilir).
+3. LSPosed Yoneticisi'ni ac -> Moduller -> "iOS Blur Clock" -> etkinlestir ->
+   kapsam (scope) olarak **System UI**'yi sec.
+4. Telefonu yeniden baslat (Zygisk hook'lari genelde reboot ister).
+5. Ayarlar -> Kilit ekrani -> Ozel Saat Stili -> bir stil sec (orn. Sternum,
+   ios1-ios19 vs.) -> Apply.
+
+## Bilinen sinirlamalar / ilk surum notlari
+
+- Sadece `textClocks` (rakamlar) icin uygulaniyor; tarih yazisi ("14 Tem Sal")
+  veya marka yazisi ("Sternum") kapsam disi. Onlari da istersen
+  `ClockBlurHook.kt` icinde `styledTextViews` listesini de donguye eklemek
+  yeterli (tek satir degisiklik).
+- Ekran donmesi (rotation) test edilmedi; teorik olarak `w`/`h` degisince
+  onbellek otomatik yenileniyor ama gercek cihazda dogrulanmadi.
+- `textClocks` alan adi bu ROM build'inin decompile ciktisindan alindi. ROM
+  guncellenirse SystemUI.apk'nin field/method isimleri degisebilir, hook
+  sessizce calismayabilir (logda hata gorursun, kod atmaz).
+- Reflection ile erisilen alan: `textClocks` (ArrayList). Bulunamazsa
+  `applyGlassEffect` sessizce return eder, crash olmaz.
+
+## Sorun giderme
+
+```bash
+su -c 'logcat -s iOSClockBlur:* Xposed:*'
+```
+
+Aranacak satirlar:
+- `hooked com.android.systemui.clocks.ClockStyle.updateClockView successfully`
+  -> hook basariyla takildi
+- `glass shader applied to N TextClock view(s)` -> her saat guncellemesinde
+  gorunmeli
+- `ClockStyle class not found` -> bu ROM build'inde sinif adi/yolu farkli,
+  yeniden decompile edip class adini guncellemek gerekir
+- `could not read wallpaper` -> WallpaperManager erisimi basarisiz oldu
+
+## Ayarlanabilir degerler
+
+`ClockBlurHook.kt` en ustteki `companion object` icinde:
+- `DOWNSCALE` (varsayilan 6): daha buyuk = daha hizli ama daha "yumusak" blur
+- `BLUR_RADIUS` (varsayilan 10) ve `BLUR_PASSES` (varsayilan 3): blur siddeti
