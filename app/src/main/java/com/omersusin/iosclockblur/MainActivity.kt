@@ -13,6 +13,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import org.json.JSONObject
 import java.io.File
 
 class MainActivity : Activity() {
@@ -23,18 +24,17 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(Prefs.FILE_NAME, Context.MODE_PRIVATE)
 
-        // Make sure the prefs file actually exists on disk before we try to
-        // chmod it (a fresh getSharedPreferences() call alone may not create
-        // the underlying XML file until the first write).
         if (!prefs.contains(Prefs.KEY_ENABLED)) {
             prefs.edit()
                 .putBoolean(Prefs.KEY_ENABLED, Prefs.DEFAULT_ENABLED)
                 .putInt(Prefs.KEY_BLUR_RADIUS, Prefs.DEFAULT_BLUR_RADIUS)
                 .putInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE)
                 .putBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE)
+                .putBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER)
                 .apply()
         }
         makeWorldReadable()
+        writeRootConfig() // best-effort; silently does nothing if root isn't granted
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -66,6 +66,11 @@ class MainActivity : Activity() {
             prefs.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE)
         ) { checked -> save { it.putBoolean(Prefs.KEY_INCLUDE_DATE, checked) } }
 
+        addSwitch(
+            root, "Uyumluluk modu (yazi/gorsel bozuluyorsa ac)",
+            prefs.getBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER)
+        ) { checked -> save { it.putBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, checked) } }
+
         addNote(root)
 
         val scroll = ScrollView(this)
@@ -78,18 +83,21 @@ class MainActivity : Activity() {
         block(editor)
         editor.apply()
         makeWorldReadable()
-        // Ask the already-running SystemUI hook to re-read prefs and repaint
-        // right away, instead of waiting for a reboot or a clock-style change.
-        sendBroadcast(Intent(Prefs.ACTION_SETTINGS_CHANGED).setPackage("com.android.systemui"))
+        writeRootConfig()
+        sendBroadcast(
+            Intent(Prefs.ACTION_SETTINGS_CHANGED)
+                .setPackage("com.android.systemui")
+                .putExtra(Prefs.EXTRA_TOKEN, Prefs.TOKEN)
+        )
     }
 
     /**
-     * SystemUI runs as a different UID than this app, so it can't use the
-     * normal SharedPreferences API to read our file - it reads the raw XML
-     * via XSharedPreferences instead. That only works if the file (and the
-     * directories leading to it) are readable by others. This is the
-     * standard, decade-old Xposed pattern for this; it can still be blocked
-     * by SELinux policy on some hardened ROMs.
+     * SystemUI runs as a different UID, so it can't use the normal
+     * SharedPreferences API to read our file - it reads the raw XML via
+     * XSharedPreferences instead. That only works if the file (and the
+     * directories leading to it) are readable by others. Standard, decade-old
+     * Xposed pattern; can still be blocked by SELinux on hardened ROMs (see
+     * writeRootConfig() for the more reliable fallback channel).
      */
     private fun makeWorldReadable() {
         try {
@@ -103,9 +111,45 @@ class MainActivity : Activity() {
                 prefsFile.setReadable(true, false)
             }
         } catch (t: Throwable) {
-            // Best effort - if this fails, settings just won't reach the hook
-            // and it will keep using its built-in defaults.
+            // Best effort - if this fails, XSharedPreferences just won't work
+            // and the hook falls back to its built-in defaults (or the root
+            // config file below, if that's available).
         }
+    }
+
+    /**
+     * Best-effort: write the current settings as JSON to a root-owned,
+     * world-readable location that isn't subject to per-app SELinux data
+     * isolation. Requires the user to grant root to this app (KernelSU will
+     * prompt on first call); if they never do, `su` simply fails and this is
+     * a silent no-op - XSharedPreferences remains the read path in the hook.
+     */
+    private fun writeRootConfig() {
+        val json = JSONObject().apply {
+            put("enabled", prefs.getBoolean(Prefs.KEY_ENABLED, Prefs.DEFAULT_ENABLED))
+            put("blur_radius", prefs.getInt(Prefs.KEY_BLUR_RADIUS, Prefs.DEFAULT_BLUR_RADIUS))
+            put("downscale", prefs.getInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE))
+            put("include_date", prefs.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE))
+            put("force_software_layer", prefs.getBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER))
+        }.toString()
+
+        Thread {
+            try {
+                val proc = Runtime.getRuntime().exec(
+                    arrayOf(
+                        "su", "-c",
+                        "mkdir -p ${Prefs.ROOT_CONFIG_DIR} && " +
+                            "cat > ${Prefs.ROOT_CONFIG_PATH} && " +
+                            "chmod 644 ${Prefs.ROOT_CONFIG_PATH} && " +
+                            "chmod 755 ${Prefs.ROOT_CONFIG_DIR}"
+                    )
+                )
+                proc.outputStream.use { it.write(json.toByteArray()); it.flush() }
+                proc.waitFor()
+            } catch (t: Throwable) {
+                // No root granted / denied / su missing - silently ignore.
+            }
+        }.start()
     }
 
     // ---- tiny manual UI builder helpers (kept dependency-free, no XML layouts) ----
@@ -122,7 +166,11 @@ class MainActivity : Activity() {
     private fun addInfo(parent: LinearLayout) {
         parent.addView(TextView(this).apply {
             text = "Degisiklikler SystemUI'ye hemen bildirilir. Gorunmezse " +
-                "kilit ekranini bir kere ac/kapa ya da telefonu yeniden baslat."
+                "kilit ekranini bir kere ac/kapa ya da telefonu yeniden baslat.\n\n" +
+                "Ilk acilista bir 'Superuser istegi' cikabilir - onaylarsan " +
+                "ayarlar daha guvenilir bir kanaldan SystemUI'ye ulasir. " +
+                "Onaylamazsan da modul calismaya devam eder, sadece ayarlar " +
+                "biraz daha kirilgan bir yoldan (XSharedPreferences) tasinir."
             textSize = 13f
             setTextColor(Color.DKGRAY)
             setPadding(0, 0, 0, 32)

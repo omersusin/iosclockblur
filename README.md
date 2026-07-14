@@ -27,6 +27,47 @@ gercek "buzlu cam" gorunumu.
 5. Ayarlar -> Kilit ekrani -> Ozel Saat Stili -> bir stil sec (orn. Sternum,
    ios1-ios19 vs.) -> Apply.
 
+## v2 degisiklikleri (ikinci AI inceleme turundan sonra)
+
+Kabul edilip uygulananlar:
+- Reflection alan adlari (`textClocks`/`styledTextViews`) bulunamazsa/bossa
+  view-tree taramasina otomatik dusuyor.
+- Kilit ekrani duvar kagidi once `FLAG_LOCK`, sonra `FLAG_SYSTEM`, en son
+  `WallpaperManager.drawable` sirasiyla deneniyor.
+- **AOD/Doze**: `ClockStyle.applyClockAlpha()` de hook'landi - dozing'e
+  girildiginde shader kaldiriliyor (arka plan siyah, wallpaper gorunmuyor,
+  static buzlu-cam dokusu hem anlamsiz hem burn-in riski).
+- Canli duvar kagidi (`wallpaperInfo != null`) tespit edilip nazikce
+  atlaniyor (crash/siyah ekran yerine).
+- Blur uretimi artik arka plan thread'inde (`Executors.newSingleThreadExecutor`),
+  sonuc `Handler(mainLooper)` ile geri donuyor - dozing gecisleri sikca
+  oldugu icin jank riskini azaltir.
+- Cache anahtarina `getWallpaperId(FLAG_LOCK)` eklendi (wallpaper degisince
+  `ACTION_WALLPAPER_CHANGED` gelmese bile fark edilir).
+- Ayarlar icin **root-yazilan JSON dosyasi** (`/data/local/tmp/iosclockblur/
+  config.json`) birincil kanal oldu, `XSharedPreferences` ikincil/fallback.
+  Bunun icin uygulamaya bir kez Superuser izni vermen gerekebilir (KernelSU
+  soracak); vermezsen modul yine calisir, sadece eski (daha kirilgan) yoldan.
+- Yazi tipi/gorsel bozulursa diye "Uyumluluk modu" (force software layer)
+  ayari eklendi, varsayilan kapali.
+- Ayarlar broadcast'i artik bir token tasiyor - rastgele baska bir app'in
+  ayni action'i gonderip gereksiz repaint tetiklemesini engelliyor.
+
+Bilerek reddedilenler (gerekcesiyle):
+- **Status bar offset duzeltmesi** - `getLocationOnScreen()` zaten gercek
+  ekran koordinatini donuyor, ekstra cikarma islemi hizalamayi bozar.
+- **Box blur kenar davranisini "kritik hata" olarak duzeltmek** - bu standart
+  clamp-to-edge yaklasimi, kozmetik ve saat rakamlari ekran kenarina nadiren
+  degiyor.
+- **Tam "evrensel/ROM-agnostic" mimari** (TextClock.onAttachedToWindow
+  genel hook'u + keyguard heuristigi + Compose/canvas overlay katmani) -
+  kapsam disi birakildi: tek cihaz/tek ROM icin gereksiz risk, test
+  edilemeyen ROM'lar icin kor kod, ve status bar saati gibi yanlis
+  TextClock'lari da yakalama riski var.
+- Manuel `bitmap.recycle()` cagirma - kendi onerisinde de crash riski
+  belirtilmisti (shader hala eski bitmap'i tutuyorsa); GC'ye birakmak daha
+  guvenli.
+
 ## Ayarlar ekrani
 
 Uygulama simgesine dokununca acilan ekrandan:

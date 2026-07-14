@@ -6,12 +6,17 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.graphics.Shader
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextClock
 import android.widget.TextView
@@ -21,7 +26,10 @@ import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
+import org.json.JSONObject
+import java.io.File
 import java.lang.ref.WeakReference
+import java.util.concurrent.Executors
 
 /**
  * Makes the ROM's built-in lockscreen "Custom Clock Style" (ClockStyle.java, the
@@ -29,11 +37,16 @@ import java.lang.ref.WeakReference
  * look: each TextClock's Paint gets a BitmapShader built from a blurred,
  * screen-aligned crop of the current wallpaper, instead of a flat color.
  *
- * Settings (enabled, blur radius, downscale, include-date) are written by
- * MainActivity into normal SharedPreferences and read here via
- * XSharedPreferences, since this code executes inside SystemUI's process
- * (different UID) after LSPosed injects it - it can't use the module's own
- * getSharedPreferences() directly.
+ * Two hook points on ClockStyle:
+ *  - updateClockView(): full rebuild (style/size change, first inflate).
+ *  - applyClockAlpha(): also fires on dozing (AOD) transitions even when the
+ *    view isn't rebuilt - used here to strip the shader while dozing, since
+ *    the doze background is black and there's no wallpaper behind the clock.
+ *
+ * Config is read from (in order): a root-written JSON file at
+ * Prefs.ROOT_CONFIG_PATH (reliable but requires the user to grant root to
+ * the settings app), then XSharedPreferences (no root needed, but can be
+ * blocked by SELinux on some ROMs), then hardcoded defaults. Never throws.
  */
 class ClockBlurHook : IXposedHookLoadPackage {
 
@@ -44,11 +57,27 @@ class ClockBlurHook : IXposedHookLoadPackage {
         private const val BLUR_PASSES = 3
     }
 
+    private data class Config(
+        val enabled: Boolean,
+        val blurRadius: Int,
+        val downscale: Int,
+        val includeDate: Boolean,
+        val forceSoftwareLayer: Boolean,
+    )
+
+    // All of the fields below are only ever touched on SystemUI's main thread:
+    // hook callbacks run there, and the background blur executor hands its
+    // result back via mainHandler.post{}. No locking needed.
     private var cachedBlurred: Bitmap? = null
     private var cachedForWidth = 0
     private var cachedForHeight = 0
     private var cachedForRadius = -1
     private var cachedForDownscale = -1
+    private var cachedForWallpaperId = Int.MIN_VALUE
+    private var building = false
+
+    private val blurExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var receiversRegistered = false
     private val activeClockViews = mutableListOf<WeakReference<View>>()
@@ -72,8 +101,25 @@ class ClockBlurHook : IXposedHookLoadPackage {
             }
         })
 
-        XposedBridge.log("$TAG: hooked $CLOCK_CLASS.updateClockView successfully")
+        val alphaMethod = XposedHelpers.findMethodExactIfExists(clockStyleClass, "applyClockAlpha")
+        if (alphaMethod != null) {
+            XposedBridge.hookMethod(alphaMethod, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        onDozeStateMaybeChanged(param.thisObject as View)
+                    } catch (t: Throwable) {
+                        XposedBridge.log("$TAG: onDozeStateMaybeChanged failed: $t")
+                    }
+                }
+            })
+        } else {
+            XposedBridge.log("$TAG: applyClockAlpha not found - AOD shader-clearing only via full rebuilds")
+        }
+
+        XposedBridge.log("$TAG: hooked $CLOCK_CLASS successfully")
     }
+
+    // ---- Hook entry points ----------------------------------------------------
 
     private fun onClockRebuilt(clockStyleView: View) {
         registerReceiversOnce(clockStyleView.context)
@@ -95,82 +141,145 @@ class ClockBlurHook : IXposedHookLoadPackage {
         }
     }
 
+    private fun onDozeStateMaybeChanged(clockStyleView: View) {
+        registerReceiversOnce(clockStyleView.context)
+        rememberView(clockStyleView)
+        applyGlassEffect(clockStyleView)
+    }
+
     private fun rememberView(view: View) {
         activeClockViews.removeAll { it.get() == null || it.get() === view }
         activeClockViews.add(WeakReference(view))
     }
 
+    // ---- Core apply logic -------------------------------------------------
+
     private fun applyGlassEffect(clockStyleView: View) {
         val context = clockStyleView.context ?: return
+        val config = loadConfig()
+        val (textClocks, styledTextViews) = resolveViews(clockStyleView)
 
-        val xprefs = try {
-            XSharedPreferences(Prefs.PACKAGE_NAME, Prefs.FILE_NAME).apply { reload() }
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: could not read settings, using defaults: $t")
-            null
+        if (!config.enabled) {
+            clearShaders(textClocks)
+            clearShaders(styledTextViews)
+            return
         }
+        if (textClocks.isEmpty()) return
 
-        val enabled = xprefs?.getBoolean(Prefs.KEY_ENABLED, Prefs.DEFAULT_ENABLED) ?: Prefs.DEFAULT_ENABLED
-        val radius = xprefs?.getInt(Prefs.KEY_BLUR_RADIUS, Prefs.DEFAULT_BLUR_RADIUS) ?: Prefs.DEFAULT_BLUR_RADIUS
-        val downscale = xprefs?.getInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE) ?: Prefs.DEFAULT_DOWNSCALE
-        val includeDate = xprefs?.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE) ?: Prefs.DEFAULT_INCLUDE_DATE
-
-        @Suppress("UNCHECKED_CAST")
-        val textClocks = XposedHelpers.getObjectField(clockStyleView, "textClocks") as? ArrayList<View>
-        @Suppress("UNCHECKED_CAST")
-        val styledTextViews = XposedHelpers.getObjectField(clockStyleView, "styledTextViews") as? ArrayList<View>
-
-        if (!enabled) {
+        val isDozing = try {
+            XposedHelpers.getBooleanField(clockStyleView, "isDozing")
+        } catch (t: Throwable) {
+            false
+        }
+        if (isDozing) {
+            // AOD background is black - no wallpaper behind the clock, and a
+            // static glass texture there would look wrong and adds pointless
+            // static-content burn-in risk. Just clear back to normal.
             clearShaders(textClocks)
             clearShaders(styledTextViews)
             return
         }
 
-        if (textClocks.isNullOrEmpty()) return
-
         val screenW = context.resources.displayMetrics.widthPixels
         val screenH = context.resources.displayMetrics.heightPixels
-        val blurred = getOrBuildBlurredWallpaper(context, screenW, screenH, radius, downscale) ?: return
+        val blurred = getCachedBlurredWallpaperOrTriggerBuild(
+            context, screenW, screenH, config.blurRadius, config.downscale
+        ) ?: return // either building async (reapplyToAllKnownViews will repaint) or unavailable (live wallpaper etc.)
 
-        var applied = paintShaderOnto(textClocks, blurred)
-        if (includeDate && styledTextViews != null) {
+        var applied = paintShaderOnto(textClocks, blurred, config.forceSoftwareLayer)
+        if (config.includeDate) {
             val dateViews = styledTextViews.filter { it !is TextClock }
-            applied += paintShaderOnto(dateViews, blurred)
+            applied += paintShaderOnto(dateViews, blurred, config.forceSoftwareLayer)
         }
         if (applied > 0) {
             XposedBridge.log("$TAG: glass shader applied to $applied view(s)")
         }
     }
 
-    private fun paintShaderOnto(views: List<View>, blurred: Bitmap): Int {
+    /**
+     * Reflection first (fast path, matches this exact ROM build); if the
+     * field is missing/renamed/empty (future ROM update), fall back to
+     * walking the view tree directly - slower but works regardless of
+     * ClockStyle's internal field names.
+     */
+    private fun resolveViews(clockStyleView: View): Pair<List<View>, List<View>> {
+        val reflectedClocks = try {
+            @Suppress("UNCHECKED_CAST")
+            XposedHelpers.getObjectField(clockStyleView, "textClocks") as? ArrayList<View>
+        } catch (t: Throwable) {
+            null
+        }
+        val reflectedAll = try {
+            @Suppress("UNCHECKED_CAST")
+            XposedHelpers.getObjectField(clockStyleView, "styledTextViews") as? ArrayList<View>
+        } catch (t: Throwable) {
+            null
+        }
+
+        if (!reflectedClocks.isNullOrEmpty()) {
+            return reflectedClocks to (reflectedAll ?: reflectedClocks)
+        }
+
+        val walkedClocks = mutableListOf<View>()
+        val walkedAll = mutableListOf<View>()
+        fun walk(v: View) {
+            when {
+                v is TextClock -> {
+                    walkedClocks += v
+                    walkedAll += v
+                }
+                v is TextView -> walkedAll += v
+            }
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) walk(v.getChildAt(i))
+            }
+        }
+        walk(clockStyleView)
+        if (walkedClocks.isNotEmpty()) {
+            XposedBridge.log("$TAG: reflection fields missing/empty, used view-tree fallback (${walkedClocks.size} clock view(s))")
+        }
+        return walkedClocks to walkedAll
+    }
+
+    private fun paintShaderOnto(views: List<View>, blurred: Bitmap, forceSoftwareLayer: Boolean): Int {
         val loc = IntArray(2)
         var count = 0
+        val desiredLayerType = if (forceSoftwareLayer) View.LAYER_TYPE_SOFTWARE else View.LAYER_TYPE_NONE
         for (v in views) {
             val tv = v as? TextView ?: continue
             tv.getLocationOnScreen(loc)
+
             val shader = BitmapShader(blurred, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
             val matrix = Matrix()
+            // View-local canvas (0,0) is screen (loc[0], loc[1]); we want that
+            // local point to sample the full-screen bitmap at (loc[0], loc[1]).
             matrix.setTranslate(-loc[0].toFloat(), -loc[1].toFloat())
             shader.setLocalMatrix(matrix)
+
             tv.paint.shader = shader
-            tv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            if (tv.layerType != desiredLayerType) {
+                tv.setLayerType(desiredLayerType, null)
+            }
             tv.invalidate()
             count++
         }
         return count
     }
 
-    private fun clearShaders(views: List<View>?) {
-        if (views == null) return
+    private fun clearShaders(views: List<View>) {
         for (v in views) {
             val tv = v as? TextView ?: continue
             if (tv.paint.shader != null) {
                 tv.paint.shader = null
-                tv.setLayerType(View.LAYER_TYPE_NONE, null)
+                if (tv.layerType != View.LAYER_TYPE_NONE) {
+                    tv.setLayerType(View.LAYER_TYPE_NONE, null)
+                }
                 tv.invalidate()
             }
         }
     }
+
+    // ---- Receivers ----------------------------------------------------------
 
     private fun registerReceiversOnce(context: Context) {
         if (receiversRegistered) return
@@ -186,6 +295,10 @@ class ClockBlurHook : IXposedHookLoadPackage {
             }
             val settingsReceiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, i: Intent?) {
+                    if (i?.getStringExtra(Prefs.EXTRA_TOKEN) != Prefs.TOKEN) {
+                        XposedBridge.log("$TAG: ignoring settings-changed broadcast with missing/wrong token")
+                        return
+                    }
                     cachedBlurred = null
                     XposedBridge.log("$TAG: settings changed, reapplying")
                     reapplyToAllKnownViews()
@@ -223,27 +336,108 @@ class ClockBlurHook : IXposedHookLoadPackage {
         }
     }
 
-    private fun getOrBuildBlurredWallpaper(
+    // ---- Config (root JSON preferred, XSharedPreferences fallback) -----------
+
+    private fun loadConfig(): Config {
+        readRootConfig()?.let { return it }
+        return readXSharedPrefsConfig()
+    }
+
+    private fun readRootConfig(): Config? {
+        return try {
+            val file = File(Prefs.ROOT_CONFIG_PATH)
+            if (!file.canRead()) return null
+            val json = JSONObject(file.readText())
+            Config(
+                enabled = json.optBoolean("enabled", Prefs.DEFAULT_ENABLED),
+                blurRadius = json.optInt("blur_radius", Prefs.DEFAULT_BLUR_RADIUS).coerceIn(1, 50),
+                downscale = json.optInt("downscale", Prefs.DEFAULT_DOWNSCALE).coerceIn(2, 16),
+                includeDate = json.optBoolean("include_date", Prefs.DEFAULT_INCLUDE_DATE),
+                forceSoftwareLayer = json.optBoolean("force_software_layer", Prefs.DEFAULT_FORCE_SOFTWARE_LAYER),
+            )
+        } catch (t: Throwable) {
+            null // file doesn't exist yet / root never granted / malformed - fall through silently
+        }
+    }
+
+    private fun readXSharedPrefsConfig(): Config {
+        val xprefs = try {
+            XSharedPreferences(Prefs.PACKAGE_NAME, Prefs.FILE_NAME).apply { reload() }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: could not read XSharedPreferences, using built-in defaults: $t")
+            null
+        }
+        return Config(
+            enabled = xprefs?.getBoolean(Prefs.KEY_ENABLED, Prefs.DEFAULT_ENABLED) ?: Prefs.DEFAULT_ENABLED,
+            blurRadius = (xprefs?.getInt(Prefs.KEY_BLUR_RADIUS, Prefs.DEFAULT_BLUR_RADIUS) ?: Prefs.DEFAULT_BLUR_RADIUS).coerceIn(1, 50),
+            downscale = (xprefs?.getInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE) ?: Prefs.DEFAULT_DOWNSCALE).coerceIn(2, 16),
+            includeDate = xprefs?.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE) ?: Prefs.DEFAULT_INCLUDE_DATE,
+            forceSoftwareLayer = xprefs?.getBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER)
+                ?: Prefs.DEFAULT_FORCE_SOFTWARE_LAYER,
+        )
+    }
+
+    // ---- Wallpaper + async blur build -----------------------------------------
+
+    /**
+     * Returns the cached bitmap if all cache keys match. Otherwise kicks off
+     * (or lets an in-flight) async rebuild and returns null immediately -
+     * caller should just skip painting this round; reapplyToAllKnownViews()
+     * repaints everything once the build finishes.
+     */
+    private fun getCachedBlurredWallpaperOrTriggerBuild(
         context: Context, w: Int, h: Int, radius: Int, downscale: Int
     ): Bitmap? {
+        val wm = WallpaperManager.getInstance(context)
+        val wallpaperId = try {
+            wm.getWallpaperId(WallpaperManager.FLAG_LOCK)
+        } catch (t: Throwable) {
+            -1
+        }
+
         cachedBlurred?.let {
             if (cachedForWidth == w && cachedForHeight == h &&
-                cachedForRadius == radius && cachedForDownscale == downscale
+                cachedForRadius == radius && cachedForDownscale == downscale &&
+                cachedForWallpaperId == wallpaperId
             ) return it
         }
+
         if (w <= 0 || h <= 0) return null
 
-        val drawable = try {
-            WallpaperManager.getInstance(context).drawable
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: could not read wallpaper: $t")
-            null
-        } ?: return null
+        // Live wallpapers have no static bitmap to sample from - skip gracefully
+        // rather than showing a stale/wrong texture.
+        if (wm.wallpaperInfo != null) {
+            return null
+        }
 
-        val full = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(full)
-        drawable.setBounds(0, 0, w, h)
-        drawable.draw(canvas)
+        if (!building) {
+            building = true
+            blurExecutor.execute {
+                val result = try {
+                    buildBlurredWallpaper(context, w, h, radius, downscale)
+                } catch (t: Throwable) {
+                    XposedBridge.log("$TAG: blur build failed: $t")
+                    null
+                }
+                mainHandler.post {
+                    building = false
+                    if (result != null) {
+                        cachedBlurred = result
+                        cachedForWidth = w
+                        cachedForHeight = h
+                        cachedForRadius = radius
+                        cachedForDownscale = downscale
+                        cachedForWallpaperId = wallpaperId
+                        reapplyToAllKnownViews()
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun buildBlurredWallpaper(context: Context, w: Int, h: Int, radius: Int, downscale: Int): Bitmap? {
+        val full = loadWallpaperBitmap(context, w, h) ?: return null
 
         val smallW = (w / downscale).coerceAtLeast(1)
         val smallH = (h / downscale).coerceAtLeast(1)
@@ -254,16 +448,53 @@ class ClockBlurHook : IXposedHookLoadPackage {
 
         val result = Bitmap.createScaledBitmap(small, w, h, true)
         if (result !== small) small.recycle()
-
-        cachedBlurred = result
-        cachedForWidth = w
-        cachedForHeight = h
-        cachedForRadius = radius
-        cachedForDownscale = downscale
         return result
     }
 
+    /** Prefers the dedicated lockscreen wallpaper (FLAG_LOCK); falls back to
+     *  the home wallpaper file, then to WallpaperManager.drawable. */
+    private fun loadWallpaperBitmap(context: Context, w: Int, h: Int): Bitmap? {
+        val wm = WallpaperManager.getInstance(context)
+
+        for (flag in intArrayOf(WallpaperManager.FLAG_LOCK, WallpaperManager.FLAG_SYSTEM)) {
+            try {
+                val pfd = wm.getWallpaperFile(flag) ?: continue
+                pfd.use { descriptor ->
+                    val decoded = BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor)
+                    if (decoded != null) {
+                        val full = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        val canvas = Canvas(full)
+                        val src = Rect(0, 0, decoded.width, decoded.height)
+                        val dst = Rect(0, 0, w, h)
+                        canvas.drawBitmap(decoded, src, dst, null)
+                        decoded.recycle()
+                        return full
+                    }
+                }
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: getWallpaperFile(flag=$flag) failed: $t")
+            }
+        }
+
+        return try {
+            val drawable = wm.drawable ?: return null
+            val full = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(full)
+            drawable.setBounds(0, 0, w, h)
+            drawable.draw(canvas)
+            full
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: could not read wallpaper drawable: $t")
+            null
+        }
+    }
+
     // ---- Simple separable box blur, applied in-place. 3 passes ~= Gaussian blur. ----
+    // Edge handling is clamp-to-edge (nearest valid pixel repeated past the
+    // border). This is a standard, intentional approximation, not a bug - it
+    // very slightly under-blurs right at the literal screen edge, which is
+    // cosmetically negligible after downscale+upscale and rarely where clock
+    // digits actually sit.
 
     private fun boxBlur(bitmap: Bitmap, radius: Int, passes: Int) {
         if (radius < 1) return
