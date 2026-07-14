@@ -77,7 +77,16 @@ class ClockBlurHook : IXposedHookLoadPackage {
     private var building = false
 
     private val blurExecutor = Executors.newSingleThreadExecutor()
-    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // MUST be lazy: LSPosed constructs this class in every zygote-forked
+    // process (system_server, this app, SystemUI, ...) just to check whether
+    // handleLoadPackage() applies - before that process's main Looper is
+    // necessarily prepared yet. Eagerly calling Handler(Looper.getMainLooper())
+    // as a field initializer crashes the constructor itself (NPE on a null
+    // Looper) in every process, which silently prevents handleLoadPackage()
+    // from ever running anywhere. Deferring to first real use (inside
+    // SystemUI, well after its Looper exists) avoids this entirely.
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     private var receiversRegistered = false
     private val activeClockViews = mutableListOf<WeakReference<View>>()
