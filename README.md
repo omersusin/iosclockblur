@@ -27,6 +27,25 @@ gercek "buzlu cam" gorunumu.
 5. Ayarlar -> Kilit ekrani -> Ozel Saat Stili -> bir stil sec (orn. Sternum,
    ios1-ios19 vs.) -> Apply.
 
+## Ayarlar ekrani
+
+Uygulama simgesine dokununca acilan ekrandan:
+- **Etkin** - kill switch, kapatinca rakamlar normal (bulaniksiz) haline doner
+- **Blur siddeti** (2-24) - box blur radius
+- **Kucultme orani** (3-12) - yuksek deger = daha yumusak + daha hizli, dusuk = daha keskin + daha yavas
+- **Tarih yazisini da bulaniklastir** - "14 Tem Sal" gibi yazilari da kapsar
+
+Degisiklikler SystemUI'ye anlik broadcast ile bildirilir; genelde reboot
+gerekmez ama gorunmezse kilit ekranini bir kere ac/kapa.
+
+**Bilinen risk:** Ayarlar, modulun kendi process'inden SystemUI process'ine
+`XSharedPreferences` (dosya izinleri manipule edilerek) ile aktariliyor. Bu
+onlarca yildir kullanilan standart Xposed yontemi ama bazi sertlestirilmis
+SELinux politikali ROM'larda calismayabilir. Calismazsa (`logcat`ta
+"settings changed, reapplying" mesaji cikiyor ama degerler hep varsayilana
+donuyorsa) haber ver, root dosyasi tabanli (`/data/local/tmp/`) daha garanti
+bir alternatife gecebiliriz.
+
 ## Bilinen sinirlamalar / ilk surum notlari
 
 - Sadece `textClocks` (rakamlar) icin uygulaniyor; tarih yazisi ("14 Tem Sal")
