@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.Shader
@@ -63,6 +64,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
         val downscale: Int,
         val includeDate: Boolean,
         val forceSoftwareLayer: Boolean,
+        val tintAlpha: Int,
     )
 
     // All of the fields below are only ever touched on SystemUI's main thread:
@@ -74,6 +76,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
     private var cachedForRadius = -1
     private var cachedForDownscale = -1
     private var cachedForWallpaperId = Int.MIN_VALUE
+    private var cachedForTint = -1
     private var building = false
 
     private val blurExecutor = Executors.newSingleThreadExecutor()
@@ -192,7 +195,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
         val screenW = context.resources.displayMetrics.widthPixels
         val screenH = context.resources.displayMetrics.heightPixels
         val blurred = getCachedBlurredWallpaperOrTriggerBuild(
-            context, screenW, screenH, config.blurRadius, config.downscale
+            context, screenW, screenH, config.blurRadius, config.downscale, config.tintAlpha
         ) ?: return // either building async (reapplyToAllKnownViews will repaint) or unavailable (live wallpaper etc.)
 
         var applied = paintShaderOnto(textClocks, blurred, config.forceSoftwareLayer)
@@ -363,6 +366,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
                 downscale = json.optInt("downscale", Prefs.DEFAULT_DOWNSCALE).coerceIn(2, 16),
                 includeDate = json.optBoolean("include_date", Prefs.DEFAULT_INCLUDE_DATE),
                 forceSoftwareLayer = json.optBoolean("force_software_layer", Prefs.DEFAULT_FORCE_SOFTWARE_LAYER),
+                tintAlpha = json.optInt("tint_alpha", Prefs.DEFAULT_TINT_ALPHA).coerceIn(0, 220),
             )
         } catch (t: Throwable) {
             null // file doesn't exist yet / root never granted / malformed - fall through silently
@@ -383,6 +387,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
             includeDate = xprefs?.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE) ?: Prefs.DEFAULT_INCLUDE_DATE,
             forceSoftwareLayer = xprefs?.getBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER)
                 ?: Prefs.DEFAULT_FORCE_SOFTWARE_LAYER,
+            tintAlpha = (xprefs?.getInt(Prefs.KEY_TINT_ALPHA, Prefs.DEFAULT_TINT_ALPHA) ?: Prefs.DEFAULT_TINT_ALPHA).coerceIn(0, 220),
         )
     }
 
@@ -395,7 +400,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
      * repaints everything once the build finishes.
      */
     private fun getCachedBlurredWallpaperOrTriggerBuild(
-        context: Context, w: Int, h: Int, radius: Int, downscale: Int
+        context: Context, w: Int, h: Int, radius: Int, downscale: Int, tintAlpha: Int
     ): Bitmap? {
         val wm = WallpaperManager.getInstance(context)
         val wallpaperId = try {
@@ -407,7 +412,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
         cachedBlurred?.let {
             if (cachedForWidth == w && cachedForHeight == h &&
                 cachedForRadius == radius && cachedForDownscale == downscale &&
-                cachedForWallpaperId == wallpaperId
+                cachedForWallpaperId == wallpaperId && cachedForTint == tintAlpha
             ) return it
         }
 
@@ -423,7 +428,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
             building = true
             blurExecutor.execute {
                 val result = try {
-                    buildBlurredWallpaper(context, w, h, radius, downscale)
+                    buildBlurredWallpaper(context, w, h, radius, downscale, tintAlpha)
                 } catch (t: Throwable) {
                     XposedBridge.log("$TAG: blur build failed: $t")
                     null
@@ -437,6 +442,7 @@ class ClockBlurHook : IXposedHookLoadPackage {
                         cachedForRadius = radius
                         cachedForDownscale = downscale
                         cachedForWallpaperId = wallpaperId
+                        cachedForTint = tintAlpha
                         reapplyToAllKnownViews()
                     }
                 }
@@ -445,7 +451,9 @@ class ClockBlurHook : IXposedHookLoadPackage {
         return null
     }
 
-    private fun buildBlurredWallpaper(context: Context, w: Int, h: Int, radius: Int, downscale: Int): Bitmap? {
+    private fun buildBlurredWallpaper(
+        context: Context, w: Int, h: Int, radius: Int, downscale: Int, tintAlpha: Int
+    ): Bitmap? {
         val full = loadWallpaperBitmap(context, w, h) ?: return null
 
         val smallW = (w / downscale).coerceAtLeast(1)
@@ -454,6 +462,14 @@ class ClockBlurHook : IXposedHookLoadPackage {
         full.recycle()
 
         boxBlur(small, radius, BLUR_PASSES)
+
+        // Real frosted-glass materials always bake in a translucent white
+        // layer on top of the blur - without this, sampled text is only as
+        // visible as the underlying content's contrast (e.g. near-invisible
+        // against a plain sky). This is what actually makes it read as glass.
+        if (tintAlpha > 0) {
+            Canvas(small).drawColor(Color.argb(tintAlpha, 255, 255, 255))
+        }
 
         val result = Bitmap.createScaledBitmap(small, w, h, true)
         if (result !== small) small.recycle()

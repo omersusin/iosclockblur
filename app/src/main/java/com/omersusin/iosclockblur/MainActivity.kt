@@ -31,6 +31,7 @@ class MainActivity : Activity() {
                 .putInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE)
                 .putBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE)
                 .putBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER)
+                .putInt(Prefs.KEY_TINT_ALPHA, Prefs.DEFAULT_TINT_ALPHA)
                 .apply()
         }
         makeWorldReadable()
@@ -60,6 +61,12 @@ class MainActivity : Activity() {
             prefs.getInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE),
             min = 3, max = 12
         ) { value -> save { it.putInt(Prefs.KEY_DOWNSCALE, value) } }
+
+        addSeekBar(
+            root, "Parlaklik / beyazlik katmani (0 = ham blur - neredeyse gorunmez, yuksek = daha 'buzlu cam')",
+            prefs.getInt(Prefs.KEY_TINT_ALPHA, Prefs.DEFAULT_TINT_ALPHA),
+            min = 0, max = 220
+        ) { value -> save { it.putInt(Prefs.KEY_TINT_ALPHA, value) } }
 
         addSwitch(
             root, "Tarih yazisini da bulaniklastir",
@@ -131,6 +138,7 @@ class MainActivity : Activity() {
             put("downscale", prefs.getInt(Prefs.KEY_DOWNSCALE, Prefs.DEFAULT_DOWNSCALE))
             put("include_date", prefs.getBoolean(Prefs.KEY_INCLUDE_DATE, Prefs.DEFAULT_INCLUDE_DATE))
             put("force_software_layer", prefs.getBoolean(Prefs.KEY_FORCE_SOFTWARE_LAYER, Prefs.DEFAULT_FORCE_SOFTWARE_LAYER))
+            put("tint_alpha", prefs.getInt(Prefs.KEY_TINT_ALPHA, Prefs.DEFAULT_TINT_ALPHA))
         }.toString()
 
         Thread {

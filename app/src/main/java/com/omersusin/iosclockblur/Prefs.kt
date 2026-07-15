@@ -9,12 +9,17 @@ object Prefs {
     const val KEY_DOWNSCALE = "downscale"
     const val KEY_INCLUDE_DATE = "include_date"
     const val KEY_FORCE_SOFTWARE_LAYER = "force_software_layer"
+    // 0-220 (out of 255). Real frosted-glass materials always bake in a
+    // translucent white layer over the blur - without it, text becomes
+    // nearly invisible against low-contrast backgrounds (e.g. plain sky).
+    const val KEY_TINT_ALPHA = "tint_alpha"
 
     const val DEFAULT_ENABLED = true
     const val DEFAULT_BLUR_RADIUS = 10
     const val DEFAULT_DOWNSCALE = 6
     const val DEFAULT_INCLUDE_DATE = false
     const val DEFAULT_FORCE_SOFTWARE_LAYER = false
+    const val DEFAULT_TINT_ALPHA = 120
 
     // Sent by the settings Activity so the already-running SystemUI hook can
     // re-read config and repaint immediately, without needing a reboot.
