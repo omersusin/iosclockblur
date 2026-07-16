@@ -16,7 +16,31 @@ gercek "buzlu cam" gorunumu.
   ile ayni gorunur.
 - Duvar kagidi degisirse (`ACTION_WALLPAPER_CHANGED`) onbellek temizlenir.
 
+## Mimari (v3): iki ayrı bileşen
+
+Proje artık **iki ayrı parça**dan oluşuyor, ikisi de kurulmalı:
+
+1. **`app/`** — LSPosed modülü (APK). Sadece SystemUI hook'unu taşır
+   (`ClockBlurHook.kt`). Kendi başına hiçbir ayar arayüzü yok artık.
+2. **`kernelsu-module/`** — KernelSU root modülü. `/data/local/tmp/
+   iosclockblur/config.json` dosyasını yöneten bir WebUI sunar
+   (`http://127.0.0.1:8765`, sadece loopback'ten erişilebilir).
+
+`ClockBlurHook.kt` her zaman önce bu JSON dosyasını okur (`readRootConfig()`),
+bulamazsa `XSharedPreferences`'a (artık kimse yazmıyor, sessizce başarısız
+olur), o da olmazsa koddaki sabit varsayılanlara düşer. Bu davranış
+değişmedi — sadece dosyayı **kim yazıyor** değişti: eskiden APK içindeki bir
+Activity `su -c` ile yazıyordu, şimdi KernelSU modülünün WebUI'si yazıyor.
+
+**Neden bu şekilde:** `/data/adb/modules/` dizini SystemUI'nin SELinux
+domain'inden (`system_app`) okunamıyor (`adb_data_file` etiketi), o yüzden
+config hâlâ `/data/local/tmp/` altında yaşıyor — sadece onu artık ayrı bir
+app'e "root ver" diye sormak yerine, kullanıcının zaten güvendiği KernelSU
+modül altyapısı yazıyor.
+
 ## Kurulum
+
+**1) LSPosed modülü:**
 
 1. Bu repoyu GitHub'a pushla, Actions sekmesinden "Build iOS Blur Clock Module"
    workflow'unun bitmesini bekle, `iosclockblur-debug-apk` artifact'ini indir.
@@ -26,6 +50,16 @@ gercek "buzlu cam" gorunumu.
 4. Telefonu yeniden baslat (Zygisk hook'lari genelde reboot ister).
 5. Ayarlar -> Kilit ekrani -> Ozel Saat Stili -> bir stil sec (orn. Sternum,
    ios1-ios19 vs.) -> Apply.
+
+**2) KernelSU WebUI modülü (ayarlar için):**
+
+1. `kernelsu-module/` klasörünü zip'le (içindekiler kökte olacak şekilde,
+   klasörün kendisi değil) ya da KernelSU Yöneticisi'nin "Modüller > +"
+   ekranından doğrudan klasör olarak kur.
+2. KernelSU Yöneticisi'nde modülü etkinleştir, reboot.
+3. Modülün yanındaki WebUI ikonuna dokun (ya da LSPosed APK'sındaki
+   "Ayarları Aç" butonunu kullan) -> `http://127.0.0.1:8765` açılır.
+4. Slider'ları ayarla, **Kaydet**'e bas.
 
 ## v2 degisiklikleri (ikinci AI inceleme turundan sonra)
 
@@ -68,24 +102,33 @@ Bilerek reddedilenler (gerekcesiyle):
   belirtilmisti (shader hala eski bitmap'i tutuyorsa); GC'ye birakmak daha
   guvenli.
 
-## Ayarlar ekrani
+## Ayarlar (v3: KernelSU WebUI)
 
-Uygulama simgesine dokununca acilan ekrandan:
+Artık uygulama içinde ayar ekranı yok. `http://127.0.0.1:8765` (sadece
+loopback, telefon dışından erişilemez) üzerinden:
 - **Etkin** - kill switch, kapatinca rakamlar normal (bulaniksiz) haline doner
-- **Blur siddeti** (2-24) - box blur radius
-- **Kucultme orani** (3-12) - yuksek deger = daha yumusak + daha hizli, dusuk = daha keskin + daha yavas
-- **Tarih yazisini da bulaniklastir** - "14 Tem Sal" gibi yazilari da kapsar
+- **Blur siddeti** (2-24, varsayilan 12)
+- **Kucultme orani** (3-12, varsayilan 6)
+- **Parlaklik / beyazlik katmani** (0-220, varsayilan 170)
+- **Tarih yazisini da bulaniklastir**
+- **Uyumluluk modu** (force software layer)
 
-Degisiklikler SystemUI'ye anlik broadcast ile bildirilir; genelde reboot
-gerekmez ama gorunmezse kilit ekranini bir kere ac/kapa.
+Kaydet'e basinca `/data/local/tmp/iosclockblur/config.json`'a yazilir ve
+SystemUI'ye token'li bir broadcast gonderilir (`am broadcast` ile, WebUI'nin
+kendi CGI script'inden, root baglaminda) - genelde reboot gerekmez, gorunmezse
+kilit ekranini bir kere ac/kapa.
 
-**Bilinen risk:** Ayarlar, modulun kendi process'inden SystemUI process'ine
-`XSharedPreferences` (dosya izinleri manipule edilerek) ile aktariliyor. Bu
-onlarca yildir kullanilan standart Xposed yontemi ama bazi sertlestirilmis
-SELinux politikali ROM'larda calismayabilir. Calismazsa (`logcat`ta
-"settings changed, reapplying" mesaji cikiyor ama degerler hep varsayilana
-donuyorsa) haber ver, root dosyasi tabanli (`/data/local/tmp/`) daha garanti
-bir alternatife gecebiliriz.
+**Cozulen risk:** Eskiden ayarlar `XSharedPreferences` (SELinux'a takilabilen
+kirilgan yol) ya da uygulama icinden ayrica istenen bir root izniyle
+tasiniyordu. Artik config dosyasini KernelSU'nun kendi modul altyapisi
+(WebUI -> CGI script, zaten root baglaminda calisiyor) yaziyor - ayri bir
+"bu app'e root ver" istegi yok, `XSharedPreferences` sadece (artik kimsenin
+yazmadigi, zararsiz) bir fallback olarak kod icinde duruyor.
+
+**Bilinen risk (WebUI tarafi):** `busybox httpd` reboot sonrasi
+`service.sh` ile bir kere baslatiliyor, coker/kapanirsa yeniden baslatma
+(respawn) mantigi yok - tekrar reboot gerekir. Tek kullanicilik bir arac
+icin simdilik kabul edilebilir bir sinirlama.
 
 ## Bilinen sinirlamalar / ilk surum notlari
 
@@ -118,6 +161,8 @@ Aranacak satirlar:
 
 ## Ayarlanabilir degerler
 
-`ClockBlurHook.kt` en ustteki `companion object` icinde:
-- `DOWNSCALE` (varsayilan 6): daha buyuk = daha hizli ama daha "yumusak" blur
-- `BLUR_RADIUS` (varsayilan 10) ve `BLUR_PASSES` (varsayilan 3): blur siddeti
+Artik `ClockBlurHook.kt` icinde sabit degil - WebUI'den (yukaridaki bolum)
+degistiriliyor, `config.json` uzerinden okunuyor. `ClockBlurHook.kt`
+icindeki tek sabit kalan deger `BLUR_PASSES = 3` (box blur gecis sayisi,
+Gaussian yaklasiklik kalitesi) - bunu degistirmek icin kod degisikligi
+gerekir.

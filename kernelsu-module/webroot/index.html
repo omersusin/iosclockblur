@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>iOS Blur Clock</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0b0d;
+    --card: #161619;
+    --border: #2a2a2f;
+    --text: #f2f2f4;
+    --sub: #9a9aa2;
+    --accent: #7fb2ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 18px 48px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Roboto, "Segoe UI", sans-serif;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 4px;
+  }
+  .sub {
+    color: var(--sub);
+    font-size: 13px;
+    margin-bottom: 24px;
+    line-height: 1.5;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .row + .row { margin-top: 18px; }
+  label.title {
+    font-size: 15px;
+    font-weight: 500;
+  }
+  .value {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+  }
+  input[type=range] {
+    width: 100%;
+    margin-top: 10px;
+    accent-color: var(--accent);
+  }
+  .switch {
+    position: relative;
+    width: 46px;
+    height: 28px;
+    flex: none;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0;
+    background: #3a3a40;
+    border-radius: 999px;
+    transition: 0.15s;
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    height: 22px; width: 22px;
+    left: 3px; top: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.15s;
+  }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider::before { transform: translateX(18px); }
+  button#save {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 12px;
+    background: var(--accent);
+    color: #0b0b0d;
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 8px;
+  }
+  button#save:active { opacity: 0.8; }
+  #status {
+    text-align: center;
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--sub);
+    min-height: 18px;
+  }
+</style>
+</head>
+<body>
+
+<h1>iOS Blur Clock</h1>
+<div class="sub">
+  Bu WebUI sadece ayarları <code>/data/local/tmp/iosclockblur/config.json</code>
+  dosyasına yazar. Efektin kendisi ayrı kurulu olan LSPosed modülü
+  tarafından uygulanıyor. Kaydettiğinde SystemUI'ye anlık bildirilir,
+  genelde kilit ekranını bir kere açıp kapatman yeterli.
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="enabled">Etkin</label>
+    <label class="switch">
+      <input type="checkbox" id="enabled">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="blurRadius">Blur şiddeti</label>
+    <span class="value" id="blurRadiusVal">12</span>
+  </div>
+  <input type="range" id="blurRadius" min="2" max="24" value="12">
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="downscale">Küçültme oranı</label>
+    <span class="value" id="downscaleVal">6</span>
+  </div>
+  <input type="range" id="downscale" min="3" max="12" value="6">
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="tintAlpha">Parlaklık / beyazlık katmanı</label>
+    <span class="value" id="tintAlphaVal">170</span>
+  </div>
+  <input type="range" id="tintAlpha" min="0" max="220" value="170">
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="includeDate">Tarih yazısını da bulanıklaştır</label>
+    <label class="switch">
+      <input type="checkbox" id="includeDate">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <label class="title" for="forceSoftwareLayer">Uyumluluk modu</label>
+    <label class="switch">
+      <input type="checkbox" id="forceSoftwareLayer">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<button id="save">Kaydet</button>
+<div id="status"></div>
+
+<script>
+const ids = ["blurRadius", "downscale", "tintAlpha"];
+ids.forEach(id => {
+  const el = document.getElementById(id);
+  const out = document.getElementById(id + "Val");
+  el.addEventListener("input", () => { out.textContent = el.value; });
+});
+
+async function load() {
+  try {
+    const res = await fetch("cgi-bin/load.sh", { cache: "no-store" });
+    const cfg = await res.json();
+    document.getElementById("enabled").checked = !!cfg.enabled;
+    document.getElementById("blurRadius").value = cfg.blur_radius;
+    document.getElementById("blurRadiusVal").textContent = cfg.blur_radius;
+    document.getElementById("downscale").value = cfg.downscale;
+    document.getElementById("downscaleVal").textContent = cfg.downscale;
+    document.getElementById("tintAlpha").value = cfg.tint_alpha;
+    document.getElementById("tintAlphaVal").textContent = cfg.tint_alpha;
+    document.getElementById("includeDate").checked = !!cfg.include_date;
+    document.getElementById("forceSoftwareLayer").checked = !!cfg.force_software_layer;
+  } catch (e) {
+    document.getElementById("status").textContent = "Mevcut ayarlar okunamadı, varsayılanlar gösteriliyor.";
+  }
+}
+
+async function save() {
+  const cfg = {
+    enabled: document.getElementById("enabled").checked,
+    blur_radius: parseInt(document.getElementById("blurRadius").value, 10),
+    downscale: parseInt(document.getElementById("downscale").value, 10),
+    tint_alpha: parseInt(document.getElementById("tintAlpha").value, 10),
+    include_date: document.getElementById("includeDate").checked,
+    force_software_layer: document.getElementById("forceSoftwareLayer").checked
+  };
+  const statusEl = document.getElementById("status");
+  try {
+    const res = await fetch("cgi-bin/save.sh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg)
+    });
+    const text = await res.text();
+    statusEl.textContent = text.trim() === "OK" ? "✓ Kaydedildi" : "Hata: " + text;
+  } catch (e) {
+    statusEl.textContent = "Kaydedilemedi: " + e;
+  }
+}
+
+document.getElementById("save").addEventListener("click", save);
+load();
+</script>
+
+</body>
+</html>

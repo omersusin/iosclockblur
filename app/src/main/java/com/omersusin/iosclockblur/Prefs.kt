@@ -15,11 +15,14 @@ object Prefs {
     const val KEY_TINT_ALPHA = "tint_alpha"
 
     const val DEFAULT_ENABLED = true
-    const val DEFAULT_BLUR_RADIUS = 10
+    const val DEFAULT_BLUR_RADIUS = 12
     const val DEFAULT_DOWNSCALE = 6
     const val DEFAULT_INCLUDE_DATE = false
     const val DEFAULT_FORCE_SOFTWARE_LAYER = false
-    const val DEFAULT_TINT_ALPHA = 120
+    // Empirically tuned by the user against a dark night-sky wallpaper,
+    // matched side-by-side against a real iOS depth-effect screenshot.
+    // Low tint values leave text nearly invisible on dark/busy wallpapers.
+    const val DEFAULT_TINT_ALPHA = 170
 
     // Sent by the settings Activity so the already-running SystemUI hook can
     // re-read config and repaint immediately, without needing a reboot.

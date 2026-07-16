@@ -1,0 +1,6 @@
+id=iosclockblur_webui
+name=iOS Blur Clock - Ayarlar (WebUI)
+version=v1.0
+versionCode=1
+author=omersusin
+description=iOS Blur Clock LSPosed modulu icin WebUI tabanli ayarlar sunucusu. Etkiyi kendisi uygulamaz - sadece config.json'i yazar. Asil efekt icin ayrica iosclockblur LSPosed modulu (APK) kurulu ve LSPosed'de System UI kapsaminda etkin olmali.
